@@ -1,0 +1,800 @@
+library(tidyverse)
+library(RColorBrewer)
+library(viridis)
+library(ggdendro)
+library(patchwork) 
+
+file_path <- "D:/data/australia_dg_BP"
+
+out_put_path <- "D:/data_analysis/BP_australia_dietary"
+
+files_name <- list.files(path = file_path, pattern = "*.csv", full.names = FALSE)
+
+print(files_name)
+
+sample_names <- gsub( "_proteins.fastaoutput.xml.csv", "", files_name)
+
+BP <- data.frame()
+
+proteins <- data.frame()
+
+df_whole <- data.frame()
+
+for (st in sample_names) {
+  df_raw <- read_csv(file.path(file_path, paste0(st, "_proteins.fastaoutput.xml.csv")))
+  colnames(df_raw) <- make.names(colnames(df_raw))
+  
+  df_Q <- df_raw %>% 
+    filter(Identity.Percentage == 100) %>% 
+    filter(grepl("^BP", Subject.Description)) %>% 
+    mutate(Description = Subject.Description) %>% 
+    separate(Description, into = c('BP', 'Number', 'Method', 'Functional', 
+                                   'mol_w1', 'mol_w2', 'se'), sep = "\\|")
+  
+  # get digested peptide sequence -------------------------------------------
+  
+  
+  
+  bioactive_p_database <- file.path(file_path, "bioactive_peptides_database.fasta")
+  
+  peptide_file <- file.path(file_path,  paste0(st, "_proteins.fasta"))
+  lines <- readLines(peptide_file)
+  # Find headers and indices
+  header_indices <- grep("^>", lines)
+  
+  # Append an end line index for easy sequence parsing
+  header_indices <- c(header_indices, length(lines) + 1)
+  
+  # Initialize lists to store headers and sequences
+  headers <- character(length(header_indices) - 1)
+  sequences <- character(length(header_indices) - 1)
+  
+  # Parse the headers and sequences
+  for (i in seq_along(header_indices[-length(header_indices)])) {
+    headers[i] <- gsub("^>", "", lines[header_indices[i]])
+    sequences[i] <- paste0(
+      lines[(header_indices[i] + 1):(header_indices[i + 1] - 1)],
+      collapse = ""
+    )
+  }
+  
+  # Create a data frame of headers and sequences
+  digested_peptides <- data.frame(
+    Header = headers,
+    Sequence = sequences,
+    stringsAsFactors = FALSE
+  )
+  
+  
+  lines <- readLines(bioactive_p_database)
+  
+  headers <- lines[grep("^>", lines)]
+  
+  sequences <- lines[!grepl("^>", lines)]
+  
+  bioactive_p_db <- data.frame(
+    Header = gsub("^>", "", headers),
+    Sequence = sequences
+  )
+  
+  
+  # -------------------------------------------------------------------------
+  
+  colnames(digested_peptides) <- c("Query.ID", "P_sequence")
+  
+  colnames(bioactive_p_db) <- c("Subject.Description", "db_sequence")
+  
+  df_sele <- left_join(df_Q, digested_peptides, by = "Query.ID")
+  
+  df_sele <- left_join(df_sele, bioactive_p_db, by = "Subject.Description")
+  
+  df_sele <- df_sele %>% 
+    mutate(db_sequence_n = str_count(db_sequence, "[a-zA-Z]"))
+  df_sele <- df_sele %>% 
+    mutate(hit_percent = round((Alignment.Length/ db_sequence_n)*100, 2))
+  
+  df_100 <- df_sele %>% 
+    filter(hit_percent >= 80) %>% 
+    mutate(protein.ID = Query.ID) %>% 
+    separate(protein.ID, into = c('protein.ID', 'gp','gastric.ID', 'sp','small.ID'), 
+             sep = '_')
+  
+  df_selected <- df_100 %>% 
+    select(
+      "Query.ID", "Alignment.Length", "Hit.Sequence", "Method" ,
+      "Functional", "P_sequence" , "db_sequence" , "db_sequence_n" ,
+      "hit_percent", "protein.ID"
+    ) %>% 
+    mutate(Sample_type = st)
+  
+  total_BP_number <- nrow(df_selected)
+  
+  BP_summary <- df_selected %>% 
+    group_by(Functional) %>% 
+    summarise(functional_bp = n()) %>% 
+    mutate(Sample_type = st)
+  
+  total_protein_number <- df_selected %>% 
+    distinct(protein.ID) %>% 
+    nrow()
+  
+  protein_summary <- df_selected %>% 
+    group_by(Functional) %>% 
+    summarise(functional_pp = n_distinct(protein.ID)) %>% 
+    mutate(Sample_type = st)
+  
+  
+  BP <- rbind(BP_summary, BP)
+  proteins <- rbind(protein_summary, proteins)
+  df_whole <- rbind(df_selected, df_whole)
+  
+}
+
+BP %>% 
+  write_csv(file.path(out_put_path, "BP.csv"))
+
+proteins %>% 
+  write_csv(file.path(out_put_path, "proteins.csv"))
+
+df_whole %>% 
+  write_csv(file.path(out_put_path, "results_wholeset.csv"))
+
+# plots -------------------------------------------------------------------
+custom_palette <- colorRampPalette(brewer.pal(12, "Paired"))(35)  # Expand Set3 to 20 colors
+
+BP <- read_csv(file.path(out_put_path, "BP.csv"))
+
+proteins <- read_csv(file.path(out_put_path, "proteins.csv"))
+
+sample_type <- read_csv(file.path(out_put_path, "sample_type.csv"))
+
+proteins <- read_csv(file.path(out_put_path, "proteins.csv"))
+
+BP_p <- left_join(BP, sample_type, by = 'Sample_type')
+
+BP_food_plot <- ggplot(
+  BP_p, 
+  mapping = aes(x = food_name, y = functional_bp, fill = Functional)
+) + geom_bar(stat = "identity", position = "stack")+
+  geom_text(
+    aes(label = functional_bp),                                        # Add labels for each bar segment
+    position = position_stack(vjust = 0.5),                   # Position the labels at the middle of each stacked segment
+    color = "white",                                          # Set text color for visibility
+    size = 3                                                  # Set text size
+  )+
+  scale_fill_manual(values = custom_palette) +
+  theme_minimal() +                                      # Minimal theme for a cleaner look
+  labs(
+    x = "Species",                                       # Label x-axis
+    y = "Number of bioactive peptides",                                              # Label y-axis
+    fill = "Function"                                            # Label the fill legend
+  ) +
+  theme(strip.background = element_rect(fill = "white", colour = "white"),
+        plot.background = element_rect(fill = "white", colour = "white"),
+        axis.title.x = element_text(size = 14, face = "bold"),  # X-axis title size
+        axis.title.y = element_text(size = 14, face = "bold", angle = 90),  # Y-axis title size
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1, face = "bold"),                 # X-axis text size
+        axis.text.y = element_text(size = 12, face = "bold"),                 # Y-axis text size
+        legend.title = element_text(size = 12),                # Legend title size
+        legend.text = element_text(size = 10),                 # Legend text size
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5), 
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.ticks = element_line(color = "black", size = 0.5), # Add main ticks
+        axis.ticks.length = unit(0.25, "cm"))
+
+ggsave(filename = file.path(out_put_path, "BP_food_plot.png"), 
+       plot = BP_food_plot, width = 16, height = 8, dpi = 300)
+
+# celiac toxic ------------------------------------------------------------
+BP_toxic <- BP_p %>% 
+  filter(Functional == "celiac toxic")
+
+BP_toxic_plot <- ggplot(
+  BP_toxic, 
+  mapping = aes(x = food_name, y = functional_bp, fill = food_type)
+) + geom_bar(stat = "identity", position = "stack")+
+  geom_text(
+    aes(label = functional_bp),                                        # Add labels for each bar segment
+    position = position_stack(vjust = 0.5),                   # Position the labels at the middle of each stacked segment
+    color = "white",                                          # Set text color for visibility
+    size = 3                                                  # Set text size
+  )+
+  theme_minimal() +                                      # Minimal theme for a cleaner look
+  labs(
+    title = "Celiac toxic",
+    x = "Species",                                       # Label x-axis
+    y = "Number of bioactive peptides",                                              # Label y-axis
+    fill = "Foods"                                            # Label the fill legend
+  ) +
+  theme(strip.background = element_rect(fill = "white", colour = "white"),
+        plot.background = element_rect(fill = "white", colour = "white"),
+        axis.title.x = element_text(size = 14, face = "bold"),  # X-axis title size
+        axis.title.y = element_text(size = 14, face = "bold", angle = 90),  # Y-axis title size
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1, face = "bold"),                 # X-axis text size
+        axis.text.y = element_text(size = 12, face = "bold"),                 # Y-axis text size
+        legend.title = element_text(size = 12),                # Legend title size
+        legend.text = element_text(size = 10),                 # Legend text size
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5), 
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.ticks = element_line(color = "black", size = 0.5), # Add main ticks
+        axis.ticks.length = unit(0.25, "cm"))
+
+ggsave(filename = file.path(out_put_path, "BP_toxic_plot.png"), 
+       plot = BP_toxic_plot, width = 9, height = 8, dpi = 300)
+
+# cluster -----------------------------------------------------------------
+# -------------------------------------------------------------------------
+# Prepare Data for Clustering
+cluster_data <- BP_p %>% 
+  pivot_wider(names_from = Functional, values_from = functional_bp, values_fill = 0) %>% 
+  column_to_rownames(var = "food_name")
+
+#  Compute Distance Matrix and Clustering
+dist_matrix <- dist(cluster_data, method = "euclidean")
+hclust_result <- hclust(dist_matrix, method = "complete")
+dendrogram <- as.dendrogram(hclust_result)
+
+# Extract the order of food names from clustering results
+cluster_order <- labels(dendrogram)
+
+# Reorder BP_p based on the cluster order
+BP_p <- BP_p %>%
+  mutate(food_name = factor(food_name, levels = cluster_order))  # Set food_name factor levels based on cluster order
+
+# Create the Dendrogram Plot
+dendro_plot <- ggdendrogram(dendrogram, rotate = FALSE) +
+  theme_void() +
+  theme(
+    plot.margin = margin(0, 0, 0, 0)
+  ) +
+  labs(title = "Cluster Analysis Based on Functional BP")
+
+#  Create the Reordered Stacked Bar Plot
+BP_food_plot <- ggplot(
+  BP_p, 
+  mapping = aes(x = food_name, y = functional_bp, fill = Functional)
+) + 
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(
+    aes(label = functional_bp),
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    size = 3
+  ) +
+  scale_fill_manual(values = custom_palette) +
+  theme_minimal() +
+  labs(
+    x = "Food Name",
+    y = "Number of Functional Bioactive Peptides",
+    fill = "Function"
+  ) +
+  theme(
+    strip.background = element_rect(fill = "white", colour = "white"),
+    plot.background = element_rect(fill = "white", colour = "white"),
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold", angle = 90),
+    axis.text.x = element_text(size = 10, angle = 45, hjust = 1, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", size = 0.5),
+    axis.ticks.length = unit(0.25, "cm")
+  )
+
+#  Combine the Dendrogram and Reordered Bar Chart
+combined_plot <- (dendro_plot / BP_food_plot) +
+  plot_layout(heights = c(1, 4))
+
+#  Display the Combined Plot
+print(combined_plot)
+
+ggsave(filename = file.path(out_put_path, "BP_food_cluster_plot.png"), 
+       plot = combined_plot, width = 16, height = 8, dpi = 300)
+
+
+# protein level -----------------------------------------------------------
+
+protein_p <- left_join(proteins, sample_type, by = 'Sample_type')
+
+protein_p %>% 
+  group_by(Sample_type) %>% 
+  summarise(sum = sum(functional_pp)) %>% 
+  arrange(sum) %>% 
+  print(n = 22)
+
+protein_food_plot <- ggplot(
+  protein_p, 
+  mapping = aes(x = food_name, y = functional_pp, fill = Functional)
+) + geom_bar(stat = "identity", position = "stack")+
+  geom_text(
+    aes(label = functional_pp),                                        # Add labels for each bar segment
+    position = position_stack(vjust = 0.5),                   # Position the labels at the middle of each stacked segment
+    color = "white",                                          # Set text color for visibility
+    size = 3                                                  # Set text size
+  )+
+  scale_fill_manual(values = custom_palette) +
+  theme_minimal() +                                      # Minimal theme for a cleaner look
+  labs(
+    x = "Foods",                                       # Label x-axis
+    y = "Number of functional proteins",                                              # Label y-axis
+    fill = "Function"                                            # Label the fill legend
+  ) +
+  theme(strip.background = element_rect(fill = "white", colour = "white"),
+        plot.background = element_rect(fill = "white", colour = "white"),
+        axis.title.x = element_text(size = 14, face = "bold"),  # X-axis title size
+        axis.title.y = element_text(size = 14, face = "bold", angle = 90),  # Y-axis title size
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1, face = "bold"),                 # X-axis text size
+        axis.text.y = element_text(size = 12, face = "bold"),                 # Y-axis text size
+        legend.title = element_text(size = 12),                # Legend title size
+        legend.text = element_text(size = 10),                 # Legend text size
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5), 
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.ticks = element_line(color = "black", size = 0.5), # Add main ticks
+        axis.ticks.length = unit(0.25, "cm"))
+
+ggsave(filename = file.path(out_put_path, "protein_food_plot.png"), 
+       plot = protein_food_plot, width = 16, height = 8, dpi = 300)
+
+
+# celiac toxic protein ------------------------------------------------------------
+protein_toxic <- protein_p %>% 
+  filter(Functional == "celiac toxic")
+
+protein_toxic_plot <- ggplot(
+  protein_toxic, 
+  mapping = aes(x = food_name, y = functional_pp, fill = food_type)
+) + geom_bar(stat = "identity", position = "stack")+
+  geom_text(
+    aes(label = functional_pp),                                        # Add labels for each bar segment
+    position = position_stack(vjust = 0.5),                   # Position the labels at the middle of each stacked segment
+    color = "white",                                          # Set text color for visibility
+    size = 3                                                  # Set text size
+  )+
+  theme_minimal() +                                      # Minimal theme for a cleaner look
+  labs(
+    title = "Celiac toxic",
+    x = "Foods",                                       # Label x-axis
+    y = "Number of functional proteins",                                              # Label y-axis
+    fill = "Foods"                                            # Label the fill legend
+  ) +
+  theme(strip.background = element_rect(fill = "white", colour = "white"),
+        plot.background = element_rect(fill = "white", colour = "white"),
+        axis.title.x = element_text(size = 14, face = "bold"),  # X-axis title size
+        axis.title.y = element_text(size = 14, face = "bold", angle = 90),  # Y-axis title size
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1, face = "bold"),                 # X-axis text size
+        axis.text.y = element_text(size = 12, face = "bold"),                 # Y-axis text size
+        legend.title = element_text(size = 12),                # Legend title size
+        legend.text = element_text(size = 10),                 # Legend text size
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5), 
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.ticks = element_line(color = "black", size = 0.5), # Add main ticks
+        axis.ticks.length = unit(0.25, "cm"))
+
+ggsave(filename = file.path(out_put_path, "protein_toxic_plot.png"), 
+       plot = protein_toxic_plot, width = 9, height = 8, dpi = 300)
+
+
+# functions -----------------------------------------------------------------
+
+BP_food_plot <- ggplot(
+  BP_p, 
+  mapping = aes(x = food_name, y = functional_bp, fill = functional_bp)
+) + geom_col()+
+  scale_fill_gradientn(colors = custom_colors) +
+  theme_minimal() + 
+  geom_text(
+    aes(label = functional_bp),                                        # Add labels for each bar segment
+    position = position_stack(vjust = 1),                   # Position the labels at the middle of each stacked segment
+    color = "black",                                          # Set text color for visibility
+    size = 2                                                  # Set text size
+  )+ # Minimal theme for a cleaner look
+  labs(
+    x = "Foods",                                       # Label x-axis
+    y = "Number of bioactive peptides",                                              # Label y-axis
+    fill = "Number"                                            # Label the fill legend
+  ) +
+  theme(strip.background = element_rect(fill = "white", colour = "white"),
+        plot.background = element_rect(fill = "white", colour = "white"),
+        axis.title.x = element_text(size = 14, face = "bold"),  # X-axis title size
+        axis.title.y = element_text(size = 14, face = "bold", angle = 90),  # Y-axis title size
+        axis.text.x = element_text(size = 9, angle = 45, hjust = 1),                 # X-axis text size
+        axis.text.y = element_text(size = 10, face = "bold"),                 # Y-axis text size
+        legend.title = element_text(size = 12),                # Legend title size
+        legend.text = element_text(size = 10),                 # Legend text size
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5), 
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.ticks = element_line(color = "black", size = 0.5), # Add main ticks
+        axis.ticks.length = unit(0.25, "cm"))+ 
+  facet_wrap(~Functional, scales = "free_y")
+
+ggsave(filename = file.path(out_put_path, "BP_food_facet_function_plot1.png"), 
+       plot = BP_food_plot, width = 20, height = 8, dpi = 300)
+
+
+protein_food_plot <- ggplot(
+  protein_p, 
+  mapping = aes(x = food_name, y = functional_pp, fill = functional_pp)
+) + geom_col()+
+  scale_fill_gradientn(colors = custom_colors) +
+  theme_minimal() + 
+  geom_text(
+    aes(label = functional_pp),                                        # Add labels for each bar segment
+    position = position_stack(vjust = 1),                   # Position the labels at the middle of each stacked segment
+    color = "black",                                          # Set text color for visibility
+    size = 2                                                  # Set text size
+  )+ # Minimal theme for a cleaner look
+  labs(
+    x = "Foods",                                       # Label x-axis
+    y = "Number of functional proteins",                                              # Label y-axis
+    fill = "Number"                                            # Label the fill legend
+  ) +
+  theme(strip.background = element_rect(fill = "white", colour = "white"),
+        plot.background = element_rect(fill = "white", colour = "white"),
+        axis.title.x = element_text(size = 14, face = "bold"),  # X-axis title size
+        axis.title.y = element_text(size = 14, face = "bold", angle = 90),  # Y-axis title size
+        axis.text.x = element_text(size = 9, angle = 45, hjust = 1),                 # X-axis text size
+        axis.text.y = element_text(size = 10, face = "bold"),                 # Y-axis text size
+        legend.title = element_text(size = 12),                # Legend title size
+        legend.text = element_text(size = 10),                 # Legend text size
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5), 
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.ticks = element_line(color = "black", size = 0.5), # Add main ticks
+        axis.ticks.length = unit(0.25, "cm"))+ 
+  facet_wrap(~Functional, scales = "free_y")
+
+ggsave(filename = file.path(out_put_path, "protein_food_plotfacet_function_plot1.png"), 
+       plot = protein_food_plot, width = 20, height = 8, dpi = 300)
+
+
+# -------------------------------------------------------------------------
+
+BP_df <- BP_p %>% 
+  pivot_wider(names_from = Functional, values_from = functional_bp) %>% 
+  mutate(across(everything(), ~replace_na(.x, 0))) %>% 
+  mutate(total = rowSums(across(4:27)))
+
+# Use row-wise clustering (transpose the data for clustering by `Type`)
+clustering <- hclust(dist(BP_df[-3]))  # Exclude the Type column from clustering
+dendro_data <- as.dendrogram(clustering)
+
+#  Reorder the x-axis based on the clustering
+new_order <- BP_df$food_name[clustering$order]
+BP_df <- BP_df %>%
+  mutate(food_name = factor(food_name, levels = new_order))
+
+# Step 3: Create the dendrogram plot
+dendro_plot <- ggdendrogram(dendro_data, rotate = FALSE) +
+  theme_void() +
+  theme(
+    axis.text.x = element_blank(),  # Hide x-axis text
+    axis.ticks.x = element_blank(), # Hide x-axis ticks
+    axis.title.x = element_blank(), # Hide x-axis label
+    plot.margin = margin(0, 0, 0, 0)  # Remove plot margins
+  )+ labs(
+    title = "Hierarchical clustering and heatmap for bioactive peptides from foods"
+  )
+
+BP_df_long <- BP_df %>% 
+  pivot_longer(4:28)
+# Plotting the stacked bar chart using ggplot2 for the top 20 genera
+custom_colors <- c("white", "red", "yellow", "green", "blue") 
+
+scfa_48h_plot <- ggplot(BP_df_long, 
+                        aes(x = food_name, y = name, fill = value)) + # Mapping fill to 'name' to stack by genus
+  #geom_tile(aes(fill = value), color = "white") + 
+  #scale_fill_gradient(low = "white", high = "blue") +
+  geom_tile(color = "white") +
+  scale_fill_gradientn(colors = custom_colors) +
+  theme_minimal() +                                      # Minimal theme for a cleaner look
+  labs(
+    x = "Foods",                                       # Label x-axis
+    y = "BP functions",                                              # Label y-axis
+    fill = "Number of BP"                                            # Label the fill legend
+  ) +
+  theme(strip.background = element_rect(fill = "white", colour = "white"),
+        plot.background = element_rect(fill = "white", colour = "white"),
+        axis.title.x = element_text(size = 14, face = "bold"),  # X-axis title size
+        axis.title.y = element_text(size = 14, face = "bold", angle = 90),  # Y-axis title size
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1, face = "bold"),                 # X-axis text size
+        axis.text.y = element_text(size = 12, face = "bold"),                 # Y-axis text size
+        legend.title = element_text(size = 12),                # Legend title size
+        legend.text = element_text(size = 10),                 # Legend text size
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5), 
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.ticks = element_line(color = "black", size = 0.5), # Add main ticks
+        axis.ticks.length = unit(0.25, "cm"))
+
+
+# Combine the dendrogram and bar chart without gaps
+BP_df_plot <- (dendro_plot + scfa_48h_plot + plot_layout(heights = c(1, 4), guides = "collect")) & 
+  theme(plot.background = element_rect(fill = "white", color = NA))  # Remove plot background
+
+ggsave(filename = file.path(out_put_path, "BP_df_heatmap_plot.png"), 
+       plot = BP_df_plot, width = 12, height = 11, dpi = 300)
+
+
+# protein heatmap ---------------------------------------------------------
+
+protein_df <- protein_p %>% 
+  pivot_wider(names_from = Functional, values_from = functional_pp) %>% 
+  mutate(across(everything(), ~replace_na(.x, 0))) %>% 
+  mutate(total = rowSums(across(4:27)))
+
+# Use row-wise clustering (transpose the data for clustering by `Type`)
+clustering <- hclust(dist(protein_df[-3]))  # Exclude the Type column from clustering
+dendro_data <- as.dendrogram(clustering)
+
+#  Reorder the x-axis based on the clustering
+new_order <- protein_df$food_name[clustering$order]
+protein_df <- protein_df %>%
+  mutate(food_name = factor(food_name, levels = new_order))
+
+#  Create the dendrogram plot
+dendro_plot <- ggdendrogram(dendro_data, rotate = FALSE) +
+  theme_void() +
+  theme(
+    axis.text.x = element_blank(),  # Hide x-axis text
+    axis.ticks.x = element_blank(), # Hide x-axis ticks
+    axis.title.x = element_blank(), # Hide x-axis label
+    plot.margin = margin(0, 0, 0, 0)  # Remove plot margins
+  )+ labs(
+    title = "Hierarchical clustering and heatmap for bioactive proteins from foods"
+  )
+
+protein_df_long <- protein_df %>% 
+  pivot_longer(4:28)
+# Plotting the stacked bar chart using ggplot2 for the top 20 genera
+custom_colors <- c("white", "red", "yellow", "green", "blue") 
+
+scfa_48h_plot <- ggplot(protein_df_long, 
+                        aes(x = food_name, y = name, fill = value)) + # Mapping fill to 'name' to stack by genus
+  #geom_tile(aes(fill = value), color = "white") + 
+  #scale_fill_gradient(low = "white", high = "blue") +
+  geom_tile(color = "white") +
+  scale_fill_gradientn(colors = custom_colors) +
+  theme_minimal() +                                      # Minimal theme for a cleaner look
+  labs(
+    x = "Foods",                                       # Label x-axis
+    y = "Protein functions",                                              # Label y-axis
+    fill = "Number of proteins"                                            # Label the fill legend
+  ) +
+  theme(strip.background = element_rect(fill = "white", colour = "white"),
+        plot.background = element_rect(fill = "white", colour = "white"),
+        axis.title.x = element_text(size = 14, face = "bold"),  # X-axis title size
+        axis.title.y = element_text(size = 14, face = "bold", angle = 90),  # Y-axis title size
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1, face = "bold"),                 # X-axis text size
+        axis.text.y = element_text(size = 12, face = "bold"),                 # Y-axis text size
+        legend.title = element_text(size = 12),                # Legend title size
+        legend.text = element_text(size = 10),                 # Legend text size
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5), 
+        axis.line = element_line(color = "black", linewidth = 0.5),
+        axis.ticks = element_line(color = "black", size = 0.5), # Add main ticks
+        axis.ticks.length = unit(0.25, "cm"))
+
+
+# Combine the dendrogram and bar chart without gaps
+protein_df_plot <- (dendro_plot + scfa_48h_plot + plot_layout(heights = c(1, 4), guides = "collect")) & 
+  theme(plot.background = element_rect(fill = "white", color = NA))  
+
+ggsave(filename = file.path(out_put_path, "protein_df_heatmap_plot.png"), 
+       plot = protein_df_plot, width = 12, height = 11, dpi = 300)
+
+
+library(tidyverse)
+library(RColorBrewer)
+library(ggdendro)
+library(patchwork) 
+library(rlang)
+library(Peptides)
+library(protr)
+library(ggridges)
+
+out_put_path <- "D:/data_analysis/BP_australia_dietary" 
+
+df_process <- read_csv(file.path(out_put_path, "bioactive_proteins_quantitation_no_na.csv"))
+
+df_physicochemical_quant <- df_process %>% 
+  select(food_name, protein_ID, description, raletive_quantity, Sequence) %>% 
+  mutate(hydrophobicity_value = hydrophobicity(Sequence, scale = "KyteDoolittle")) %>% 
+  mutate(pI_value = pI(Sequence)) %>% 
+  mutate(mw_value = mw(Sequence)) %>% 
+  mutate(charge_value = charge(Sequence, pH = 7.0)) %>% 
+  mutate(solubility = protr::extractAAC(Sequence)) %>% 
+  distinct(Sequence, .keep_all = TRUE)
+
+df_physicochemical_quant$raletive_quantity %>% 
+  summary()
+
+df_physicochemical_quant <- df_physicochemical_quant %>% 
+  mutate(desp = gsub("^(.*?)(;|\\[|$).*", "\\1", description)) 
+
+plot_name <- df_physicochemical_quant %>% distinct(food_name) %>% pull(food_name)
+
+for (n in plot_name) {
+  df_plot <- df_physicochemical_quant %>% 
+    filter(food_name == n)
+  
+  P_plot <- ggplot(
+    df_plot, 
+    mapping = aes(x = raletive_quantity, y = desp)
+  ) + geom_col() + 
+    theme_minimal() +                                      # Minimal theme for a cleaner look
+    labs(
+      title = paste(n),
+      x = "Relative quantity of proteins",                                       # Label x-axis
+      y = "Protein",                                              # Label y-axis                                           # Label the fill legend
+    ) +
+    theme(strip.background = element_rect(fill = "white", colour = "white"),
+          plot.background = element_rect(fill = "white", colour = "white"),
+          axis.title.x = element_text(size = 14, face = "bold"),  # X-axis title size
+          axis.title.y = element_text(size = 14, face = "bold", angle = 90),  # Y-axis title size
+          axis.text.x = element_text(size = 10, angle = 0, face = "bold",),                 # X-axis text size
+          axis.text.y = element_text(size = 12, face = "bold"),                 # Y-axis text size
+          legend.title = element_text(size = 12),                # Legend title size
+          legend.text = element_text(size = 10),                 # Legend text size
+          plot.title = element_text(size = 16, face = "bold", hjust = 0.5), 
+          axis.line = element_line(color = "black", linewidth = 0.5),
+          axis.ticks = element_line(color = "black", linewidth = 0.5), # Add main ticks
+          axis.ticks.length = unit(0.25, "cm"))
+  ggsave(filename = file.path(out_put_path, paste0("001protein_quantity_for_", n, "_plot.png")), 
+         plot = P_plot, width = 20, height = 8, dpi = 300)
+  
+}
+
+df_hydro_plot <- ggplot(df_physicochemical_quant, 
+                        mapping = aes(x = hydrophobicity_value, y = food_name, fill = food_name)) +
+  geom_density_ridges(alpha = 0.7) +                      # Use geom_density_ridges()
+  theme_minimal() + 
+  labs(x = "Hydrophobicity of functional proteins", 
+       y = "Foods", 
+       fill = "Foods", 
+       colour = "Foods") +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(0.25, "cm"),
+    plot.margin = margin(5, 5, 5, 5)  # Increase margin to avoid overlapping
+  )
+
+# Repeat similarly for the other plots (df_pI_plot, df_mw_plot, etc.)
+
+df_pI_plot <- ggplot(df_physicochemical_quant, 
+                     mapping = aes(x = pI_value, y = food_name, fill = food_name)) +
+  geom_density_ridges(alpha = 0.7) + 
+  theme_minimal() + 
+  labs(x = "Isoelectric point of functional proteins", 
+       y = "Foods", 
+       fill = "Foods", 
+       colour = "Foods") +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(0.25, "cm"),
+    plot.margin = margin(5, 5, 5, 5)
+  )
+
+df_mw_plot <- ggplot(df_physicochemical_quant, 
+                     mapping = aes(x = mw_value, y = food_name, fill = food_name)) +
+  geom_density_ridges(alpha = 0.7) + 
+  theme_minimal() + 
+  labs(x = "Molecular weight of functional proteins", 
+       y = "Foods", 
+       fill = "Foods", 
+       colour = "Foods") +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(0.25, "cm"),
+    plot.margin = margin(5, 5, 5, 5)
+  )
+
+df_charge_plot <- ggplot(df_physicochemical_quant, 
+                     mapping = aes(x = charge_value, y = food_name, fill = food_name)) +
+  geom_density_ridges(alpha = 0.7) + 
+  theme_minimal() + 
+  labs(x = "Charge of functional proteins", 
+       y = "Foods", 
+       fill = "Foods", 
+       colour = "Foods") +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(0.25, "cm"),
+    plot.margin = margin(5, 5, 5, 5)
+  )
+
+df_solubility_plot <- ggplot(df_physicochemical_quant, 
+                     mapping = aes(x = solubility, y = food_name, fill = food_name)) +
+  geom_density_ridges(alpha = 0.7) + 
+  theme_minimal() + 
+  labs(x = "Solubility of functional proteins", 
+       y = "Foods", 
+       fill = "Foods", 
+       colour = "Foods") +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(0.25, "cm"),
+    plot.margin = margin(5, 5, 5, 5)
+  )
+
+# Combine plots
+al_02_plot <- df_hydro_plot + df_pI_plot + df_mw_plot + df_charge_plot + df_solubility_plot +
+  plot_layout(ncol = 3) +
+  plot_annotation(title = "Physicochemical Properties of Proteins")
+
+print(al_02_plot)
+
+
+ggsave(filename = file.path(out_put_path, "physicochem_property_plot02.png"), 
+       plot = al_02_plot, width = 16, height = 8, dpi = 300)
+
+
+# candidate for functional protein for extraction -------------------------
+
+df_candidate <- df_process %>% 
+  filter(raletive_quantity >= 0.1) %>% 
+  select(food_name, protein_ID, description, Functional, raletive_quantity) %>% 
+  group_by(Functional) %>% 
+  distinct(protein_ID, .keep_all = TRUE) %>% 
+  mutate(desp = gsub("^(.*?)(;|\\[|$).*", "\\1", description)) %>% 
+  mutate(percent = round(raletive_quantity, digits = 2)) %>% 
+  select(food_name, protein_ID, desp, percent, Functional)
+
+df_candidate_norepeat <- df_physicochemical_quant %>% 
+  select(food_name, protein_ID, desp, raletive_quantity, hydrophobicity_value, pI_value, mw_value, charge_value, solubility) %>% 
+  filter(raletive_quantity >= 0.05) %>% 
+  mutate(Relative_quantity = round(raletive_quantity, digits = 2)) %>% 
+  mutate(hydrophobicity = round(hydrophobicity_value, digits = 2)) %>% 
+  mutate(Isoelectric_point = round(pI_value, digits = 2) ) %>% 
+  mutate(Molecular_weight = round(mw_value, digits = 2)) %>% 
+  mutate(Charge = round(charge_value, digits = 2)) %>% 
+  mutate(Solubility = round(solubility, digits = 3)) %>% 
+  select(food_name, protein_ID, desp, Relative_quantity, hydrophobicity, Isoelectric_point,
+         Molecular_weight, Charge, Solubility)
+
+
+df_candidate_norepeat %>% 
+  write_csv(file.path(out_put_path, "functional_proteins_candidates.csv"))
+
+df_candidate %>% 
+  write_csv(file.path(out_put_path, "functional_proteins_candidates_functions.csv"))
+
+
